@@ -39,6 +39,9 @@ class VTSHotkeyPlugin():
         self.main_ws, self.event_ws = None, None
         self._trigger_hotkey_awaitable: asyncio.Future = None
         self.hotkey_execution_task, self.event_listener_task, self.message_listener_task = None, None, None
+        
+        self.response_job_id: str = None
+        self.response_emotion_gotten: bool = False
 
     async def start(self):
         self.main_ws = await self._setup_ws(
@@ -325,10 +328,17 @@ class VTSHotkeyPlugin():
                         data = json.loads(await ws.recv())
                         event, status = data[0], data[1]
                         logger.debug(f"Event received {str(event):.200}")
-                        match event['message']:
+                        
+                        status, message, response = event.get("status", 500), event.get("message", "unknown"), event.get("response", {})
+                        match message:
                             case "response":
-                                if event['response'].get('output_type') == 'emotion':
-                                    self.play_hotkey_using_message(event['response']['label'])
+                                if self.response_job_id != response.get("job_id", None):
+                                    self.response_job_id = response.get("job_id", None)
+                                    self.response_emotion_gotten = False
+                                
+                                if (not self.response_emotion_gotten) and response.get("result", {}).get("emotion", None):
+                                    self.play_hotkey_using_message(response.get("result", {}).get("emotion", None))
+                                    self.response_emotion_gotten = True
                             case _:
                                 pass
             except OSError:
