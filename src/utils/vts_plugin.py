@@ -1,4 +1,3 @@
-from transformers import pipeline
 import websockets
 import asyncio
 import json
@@ -29,7 +28,6 @@ class VTSHotkeyPlugin():
         self.debug_nonexist_hotkeys = None
 
         # Animations setup
-        self.classifier = pipeline(task="text-classification", model="SamLowe/roberta-base-go_emotions", top_k=1, device='cuda')
         self.emotion_map = {}
         self.hotkey_map = {}
         self.animations = []
@@ -41,6 +39,9 @@ class VTSHotkeyPlugin():
         self.main_ws, self.event_ws = None, None
         self._trigger_hotkey_awaitable: asyncio.Future = None
         self.hotkey_execution_task, self.event_listener_task, self.message_listener_task = None, None, None
+        
+        self.response_job_id: str = None
+        self.response_emotion_gotten: bool = False
 
     async def start(self):
         self.main_ws = await self._setup_ws(
@@ -293,20 +294,14 @@ class VTSHotkeyPlugin():
             if event["data"]["animationEventType"] == "End":
                 self._trigger_hotkey_awaitable.set_result(None)
 
-    def play_hotkey_using_message(self, message: str): 
+    def play_hotkey_using_message(self, label: str): 
         try:
-            logger.debug(f"Playing hotkey on message: {message}")
-
-            # Perform sentiment analysis on message to detect emotion
-            sentences = [message]
-            model_outputs = self.classifier(sentences)
-            emotion = model_outputs[0][0]['label']
-            logger.debug(f"Detected emotion: {emotion}")
+            logger.debug(f"Playing hotkey on label: {label}")
 
             # Get hotkeys corresponding to emotion
             set_name = self.DEFAULT_HOTKEY_SET
             for set_key in self.emotion_map:
-                if emotion in self.emotion_map[set_key]:
+                if label in self.emotion_map[set_key]:
                     set_name = set_key
                     break
             
@@ -327,35 +322,23 @@ class VTSHotkeyPlugin():
     async def _message_listener(self):
         while True:
             try:
-                async with websockets.connect(self.config['jaison_ws_endpoint']) as ws: # TODO make config
+                async with websockets.connect(self.config['jaison_ws_endpoint']) as ws:
                     logger.info("Connected to JAIson ws server")
                     while True:
                         data = json.loads(await ws.recv())
                         event, status = data[0], data[1]
                         logger.debug(f"Event received {str(event):.200}")
-                        match event['message']:
-                            case "run_start":
-                                if event['response']['run_id'] not in self.run_data:
-                                    self.run_data[event['response']['run_id']] = {
-                                        "run_id": event['response']['run_id'],
-                                        "message": "",
-                                        "text_success": True,
-                                        "output_text": event['response']['output_text'],
-                                        "output_audio": event['response']['output_audio'],
-                                    }
-                            case "run_finish":
-                                self.play_hotkey_using_message(self.run_data[event['response']['run_id']]['message'])
-                                del self.run_data[event['response']['run_id']]
-                            case "run_cancel":
-                                del self.run_data[event['response']['run_id']]
-                            case "run_t2t_chunk":
-                                if self.run_data[event['response']['run_id']]['text_success'] != event['response']['success']:
-                                    self.run_data[event['response']['run_id']] = self.run_data[event['response']['run_id']] | {
-                                        'text_success': event['response']['success'],
-                                        "message": event['response']['chunk']
-                                    }
-                                else:
-                                    self.run_data[event['response']['run_id']]['message'] += event['response']['chunk']
+                        
+                        status, message, response = event.get("status", 500), event.get("message", "unknown"), event.get("response", {})
+                        match message:
+                            case "response":
+                                if self.response_job_id != response.get("job_id", None):
+                                    self.response_job_id = response.get("job_id", None)
+                                    self.response_emotion_gotten = False
+                                
+                                if (not self.response_emotion_gotten) and response.get("result", {}).get("emotion", None):
+                                    self.play_hotkey_using_message(response.get("result", {}).get("emotion", None))
+                                    self.response_emotion_gotten = True
                             case _:
                                 pass
             except OSError:
